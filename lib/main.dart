@@ -1,12 +1,152 @@
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+
+const String activeTripKey = 'active_trip_v2';
+const String nativeChannelName = 'gps_trip_meter/native';
+
+Map<String, dynamic> positionToMap(Position? p) {
+  if (p == null) return {};
+  return {
+    'latitude': p.latitude,
+    'longitude': p.longitude,
+    'timestamp': p.timestamp.millisecondsSinceEpoch,
+    'accuracy': p.accuracy,
+    'altitude': p.altitude,
+    'altitudeAccuracy': p.altitudeAccuracy,
+    'heading': p.heading,
+    'headingAccuracy': p.headingAccuracy,
+    'speed': p.speed,
+    'speedAccuracy': p.speedAccuracy,
+  };
+}
+
+Position? positionFromMap(dynamic raw) {
+  if (raw is! Map) return null;
+  try {
+    final m = Map<String, dynamic>.from(raw);
+    return Position(
+      latitude: (m['latitude'] ?? 0).toDouble(),
+      longitude: (m['longitude'] ?? 0).toDouble(),
+      timestamp: DateTime.fromMillisecondsSinceEpoch(m['timestamp'] ?? DateTime.now().millisecondsSinceEpoch),
+      accuracy: (m['accuracy'] ?? 999).toDouble(),
+      altitude: (m['altitude'] ?? 0).toDouble(),
+      altitudeAccuracy: (m['altitudeAccuracy'] ?? 0).toDouble(),
+      heading: (m['heading'] ?? 0).toDouble(),
+      headingAccuracy: (m['headingAccuracy'] ?? 0).toDouble(),
+      speed: (m['speed'] ?? 0).toDouble(),
+      speedAccuracy: (m['speedAccuracy'] ?? 0).toDouble(),
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+ModeInfo infoFromName(String name) {
+  final mode = TripMode.values.firstWhere(
+    (m) => m.name == name,
+    orElse: () => TripMode.walk,
+  );
+  return modeInfo[mode]!;
+}
+
+double bgDistanceKm(Position a, Position b) {
+  return Geolocator.distanceBetween(a.latitude, a.longitude, b.latitude, b.longitude) / 1000.0;
+}
+
+double bgSpeedFromPositions(Position oldPos, Position newPos) {
+  final d = bgDistanceKm(oldPos, newPos);
+  final hours = newPos.timestamp.difference(oldPos.timestamp).inMilliseconds / 3600000.0;
+  return hours > 0 ? d / hours : 0;
+}
+
+Future<void> updateActiveTripFromBackground() async {
+  final prefs = await SharedPreferences.getInstance();
+  final raw = prefs.getString(activeTripKey);
+  if (raw == null) return;
+
+  Map<String, dynamic> state;
+  try {
+    state = Map<String, dynamic>.from(jsonDecode(raw));
+  } catch (_) {
+    return;
+  }
+
+  if (state['running'] != true) return;
+
+  Position pos;
+  try {
+    pos = await Geolocator.getCurrentPosition(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        timeLimit: Duration(seconds: 8),
+      ),
+    );
+  } catch (_) {
+    return;
+  }
+
+  final startMs = state['startTime'] ?? DateTime.now().millisecondsSinceEpoch;
+  final elapsedMs = DateTime.now().millisecondsSinceEpoch - startMs;
+  final modeName = state['mode'] ?? TripMode.walk.name;
+  final info = infoFromName(modeName);
+  final oldPos = positionFromMap(state['lastPos']);
+  int points = (state['pointsCount'] ?? 0) + 1;
+  double bestAccuracy = (state['bestAccuracy'] ?? 999999).toDouble();
+  double totalDistanceKm = (state['totalDistanceKm'] ?? 0).toDouble();
+  double maxSpeed = (state['maxSpeed'] ?? 0).toDouble();
+
+  if (pos.accuracy > 0 && pos.accuracy < bestAccuracy) {
+    bestAccuracy = pos.accuracy;
+  }
+
+  double kmh = 0;
+  if (pos.speed >= 0) {
+    kmh = pos.speed * 3.6;
+  } else if (oldPos != null) {
+    kmh = bgSpeedFromPositions(oldPos, pos);
+  }
+  kmh = max(0, kmh);
+
+  final warmingUp = elapsedMs < 8000 || points < 4;
+  final badAccuracy = pos.accuracy > 40;
+  final impossibleSpeed = kmh > info.maxValidSpeed;
+
+  final valid = !warmingUp && !badAccuracy && !impossibleSpeed && oldPos != null;
+
+  if (valid && oldPos != null) {
+    if (kmh > maxSpeed) maxSpeed = kmh;
+    final d = bgDistanceKm(oldPos, pos);
+    final dtSeconds = pos.timestamp.difference(oldPos.timestamp).inMilliseconds / 1000.0;
+    if (dtSeconds >= 1) {
+      final jumpSpeed = d / (dtSeconds / 3600.0);
+      if (d < 0.30 && jumpSpeed <= info.maxValidSpeed) {
+        totalDistanceKm += d;
+      }
+    }
+  } else {
+    kmh = 0;
+  }
+
+  state['lastPos'] = positionToMap(pos);
+  state['pointsCount'] = points;
+  state['bestAccuracy'] = bestAccuracy;
+  state['totalDistanceKm'] = totalDistanceKm;
+  state['maxSpeed'] = maxSpeed;
+  state['currentSpeed'] = kmh;
+  state['lastBackgroundUpdate'] = DateTime.now().millisecondsSinceEpoch;
+
+  await prefs.setString(activeTripKey, jsonEncode(state));
+}
+
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,18 +156,22 @@ void main() {
 
 @pragma('vm:entry-point')
 void startCallback() {
+  DartPluginRegistrant.ensureInitialized();
   FlutterForegroundTask.setTaskHandler(GpsTaskHandler());
 }
 
 class GpsTaskHandler extends TaskHandler {
   @override
-  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    await updateActiveTripFromBackground();
+  }
 
   @override
   void onRepeatEvent(DateTime timestamp) {
+    updateActiveTripFromBackground();
     FlutterForegroundTask.updateService(
-      notificationTitle: 'عداد رحلات GPS يعمل الآن',
-      notificationText: 'يتم تتبع الرحلة في الخلفية',
+      notificationTitle: 'عداد رحلات GPS يعمل في الخلفية',
+      notificationText: 'لا تغلق التطبيق من التطبيقات الأخيرة',
     );
   }
 
@@ -169,6 +313,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  static const MethodChannel native = MethodChannel(nativeChannelName);
   static const int maxTrips = 20;
   static const int warmupMs = 8000;
   static const int warmupPoints = 4;
@@ -176,8 +321,10 @@ class _HomeScreenState extends State<HomeScreen> {
   TripMode selectedMode = TripMode.walk;
   StreamSubscription<Position>? positionSub;
   Timer? timer;
+  Timer? activeSaveTimer;
 
   bool running = false;
+  bool restoredUnclosedTrip = false;
   String status = 'اضغط تشغيل للبدء';
 
   DateTime? startTime;
@@ -196,12 +343,14 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     initForegroundTask();
     loadTrips();
+    loadActiveTrip();
   }
 
   @override
   void dispose() {
     positionSub?.cancel();
     timer?.cancel();
+    activeSaveTimer?.cancel();
     super.dispose();
   }
 
@@ -219,7 +368,7 @@ class _HomeScreenState extends State<HomeScreen> {
         playSound: false,
       ),
       foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.repeat(5000),
+        eventAction: ForegroundTaskEventAction.repeat(7000),
         autoRunOnBoot: false,
         allowWakeLock: true,
         allowWifiLock: false,
@@ -233,12 +382,12 @@ class _HomeScreenState extends State<HomeScreen> {
     if (await FlutterForegroundTask.isRunningService) {
       await FlutterForegroundTask.updateService(
         notificationTitle: 'عداد رحلات GPS يعمل الآن',
-        notificationText: 'يتم حساب السرعة والمسافة',
+        notificationText: 'يتم حساب السرعة والمسافة في الخلفية',
       );
     } else {
       await FlutterForegroundTask.startService(
         notificationTitle: 'عداد رحلات GPS يعمل الآن',
-        notificationText: 'يتم حساب السرعة والمسافة',
+        notificationText: 'يتم حساب السرعة والمسافة في الخلفية',
         callback: startCallback,
       );
     }
@@ -249,6 +398,217 @@ class _HomeScreenState extends State<HomeScreen> {
       await FlutterForegroundTask.stopService();
     }
   }
+
+
+  Future<void> openBatterySettings() async {
+    try {
+      await native.invokeMethod('requestIgnoreBatteryOptimizations');
+    } catch (_) {
+      try {
+        await native.invokeMethod('openBatterySettings');
+      } catch (_) {
+        showSnack('افتح إعدادات البطارية واجعل التطبيق غير مقيّد');
+      }
+    }
+  }
+
+  Future<void> openAppSettings() async {
+    try {
+      await native.invokeMethod('openAppSettings');
+    } catch (_) {
+      showSnack('افتح إعدادات التطبيق يدويًا');
+    }
+  }
+
+  Future<void> saveActiveTrip() async {
+    if (!running || startTime == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(activeTripKey, jsonEncode({
+      'running': true,
+      'mode': selectedMode.name,
+      'startTime': startTime!.millisecondsSinceEpoch,
+      'lastPos': positionToMap(lastPos),
+      'pointsCount': pointsCount,
+      'currentSpeed': currentSpeed,
+      'totalDistanceKm': totalDistanceKm,
+      'maxSpeed': maxSpeed,
+      'bestAccuracy': bestAccuracy,
+      'lastSavedAt': DateTime.now().millisecondsSinceEpoch,
+    }));
+  }
+
+  Future<void> clearActiveTrip() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(activeTripKey);
+  }
+
+  Future<void> loadActiveTrip() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(activeTripKey);
+    if (raw == null) return;
+
+    try {
+      final m = Map<String, dynamic>.from(jsonDecode(raw));
+      if (m['running'] != true) return;
+
+      final modeName = m['mode'] ?? TripMode.walk.name;
+      selectedMode = TripMode.values.firstWhere(
+        (x) => x.name == modeName,
+        orElse: () => TripMode.walk,
+      );
+      startTime = DateTime.fromMillisecondsSinceEpoch(m['startTime'] ?? DateTime.now().millisecondsSinceEpoch);
+      lastPos = positionFromMap(m['lastPos']);
+      pointsCount = m['pointsCount'] ?? 0;
+      currentSpeed = (m['currentSpeed'] ?? 0).toDouble();
+      totalDistanceKm = (m['totalDistanceKm'] ?? 0).toDouble();
+      maxSpeed = (m['maxSpeed'] ?? 0).toDouble();
+      bestAccuracy = (m['bestAccuracy'] ?? 999999).toDouble();
+      restoredUnclosedTrip = true;
+
+      if (mounted) {
+        setState(() {
+          running = false;
+          status = 'تم العثور على رحلة غير مغلقة';
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) => showRestoreDialog());
+      }
+    } catch (_) {}
+  }
+
+  Future<void> showRestoreDialog() async {
+    if (!mounted || !restoredUnclosedTrip) return;
+    await showDialog(
+      context: context,
+      builder: (_) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: const Text('استعادة رحلة سابقة'),
+          content: const Text(
+            'يبدو أن التطبيق توقف أو أُغلق أثناء رحلة. هل تريد استكمال الرحلة من آخر بيانات محفوظة؟',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                await clearActiveTrip();
+                if (!mounted) return;
+                Navigator.pop(context);
+                await resetCurrent();
+              },
+              child: const Text('تصفير'),
+            ),
+            TextButton(
+              onPressed: () async {
+                if (!mounted) return;
+                Navigator.pop(context);
+                await saveRestoredAsTrip();
+              },
+              child: const Text('حفظها الآن'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                if (!mounted) return;
+                Navigator.pop(context);
+                await resumeGps();
+              },
+              child: const Text('استكمال'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> resumeGps() async {
+    if (!await ensureLocationPermission()) return;
+    await startForeground();
+
+    setState(() {
+      running = true;
+      status = 'تم استكمال الرحلة';
+    });
+
+    timer?.cancel();
+    timer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      await refreshFromActiveTrip();
+      if (mounted && running) setState(() {});
+    });
+
+    activeSaveTimer?.cancel();
+    activeSaveTimer = Timer.periodic(const Duration(seconds: 5), (_) => saveActiveTrip());
+
+    positionSub?.cancel();
+
+    const settings = LocationSettings(
+      accuracy: LocationAccuracy.bestForNavigation,
+      distanceFilter: 1,
+    );
+
+    positionSub = Geolocator.getPositionStream(locationSettings: settings).listen(
+      onPosition,
+      onError: (_) {
+        setState(() {
+          running = false;
+          status = 'خطأ في GPS';
+        });
+      },
+    );
+
+    await saveActiveTrip();
+    showSnack('تم استكمال GPS...');
+  }
+
+  Future<void> refreshFromActiveTrip() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(activeTripKey);
+    if (raw == null || !running) return;
+    try {
+      final m = Map<String, dynamic>.from(jsonDecode(raw));
+      final bgUpdate = m['lastBackgroundUpdate'];
+      if (bgUpdate == null) return;
+
+      lastPos = positionFromMap(m['lastPos']) ?? lastPos;
+      pointsCount = m['pointsCount'] ?? pointsCount;
+      currentSpeed = (m['currentSpeed'] ?? currentSpeed).toDouble();
+      totalDistanceKm = (m['totalDistanceKm'] ?? totalDistanceKm).toDouble();
+      maxSpeed = (m['maxSpeed'] ?? maxSpeed).toDouble();
+      bestAccuracy = (m['bestAccuracy'] ?? bestAccuracy).toDouble();
+    } catch (_) {}
+  }
+
+  Future<void> saveRestoredAsTrip() async {
+    if (startTime == null) return;
+    final durationMs = DateTime.now().difference(startTime!).inMilliseconds;
+    final hours = durationMs / 3600000.0;
+    final avg = hours > 0 ? totalDistanceKm / hours : 0.0;
+    final info = modeInfo[selectedMode]!;
+
+    trips.add(
+      TripRecord(
+        mode: selectedMode.name,
+        modeName: info.name,
+        modeIcon: info.icon,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        durationMs: durationMs,
+        distanceKm: round2(totalDistanceKm),
+        maxSpeed: round1(maxSpeed),
+        avgSpeed: round1(avg),
+      ),
+    );
+    await saveTrips();
+    await clearActiveTrip();
+
+    setState(() {
+      running = false;
+      status = 'تم حفظ الرحلة المستعادة';
+      currentSpeed = 0;
+      startTime = null;
+      lastPos = null;
+      pointsCount = 0;
+    });
+
+    showSnack('تم حفظ الرحلة');
+  }
+
 
   Future<void> loadTrips() async {
     final prefs = await SharedPreferences.getInstance();
@@ -316,9 +676,14 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     timer?.cancel();
-    timer = Timer.periodic(const Duration(seconds: 1), (_) {
+    timer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      await refreshFromActiveTrip();
       if (mounted && running) setState(() {});
     });
+
+    activeSaveTimer?.cancel();
+    activeSaveTimer = Timer.periodic(const Duration(seconds: 5), (_) => saveActiveTrip());
+    await saveActiveTrip();
 
     positionSub?.cancel();
 
@@ -346,6 +711,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await positionSub?.cancel();
     positionSub = null;
     timer?.cancel();
+    activeSaveTimer?.cancel();
     await stopForeground();
 
     final durationMs =
@@ -370,6 +736,8 @@ class _HomeScreenState extends State<HomeScreen> {
       await saveTrips();
     }
 
+    await clearActiveTrip();
+
     setState(() {
       running = false;
       status = 'تم حفظ الرحلة ✓';
@@ -383,6 +751,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await positionSub?.cancel();
     positionSub = null;
     timer?.cancel();
+    activeSaveTimer?.cancel();
     await stopForeground();
 
     setState(() {
@@ -452,6 +821,7 @@ class _HomeScreenState extends State<HomeScreen> {
       currentSpeed = kmh;
       status = buildStatusText(warmingUp, badAccuracy, pos.accuracy);
     });
+    saveActiveTrip();
   }
 
   String buildStatusText(bool warmingUp, bool badAccuracy, double accuracy) {
@@ -572,6 +942,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 14),
                 mainCard(speedColor),
+                const SizedBox(height: 14),
+                backgroundHelpPanel(),
                 const SizedBox(height: 14),
                 summaryPanel(
                   totalDistance: totalDistance,
@@ -827,6 +1199,23 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ),
+        const SizedBox(height: 10),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton(
+            onPressed: openBatterySettings,
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              foregroundColor: const Color(0xFF0077B6),
+              side: const BorderSide(color: Color(0xFFBFE8FF)),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+            ),
+            child: const Text(
+              '🔋 السماح بالتشغيل في الخلفية',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -928,6 +1317,43 @@ class _HomeScreenState extends State<HomeScreen> {
               backgroundColor: const Color(0xFFDCEEFA),
               color: const Color(0xFF00C875),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+
+  Widget backgroundHelpPanel() {
+    return panel(
+      title: '🔋 تشغيل الخلفية',
+      pill: 'مهم',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(13),
+            decoration: lightBoxDecoration(20),
+            child: const Text(
+              'لرحلات طويلة: اضغط زر السماح بالتشغيل في الخلفية، ثم اجعل التطبيق غير مقيّد أو غير محسّن من إعدادات البطارية. لا تغلقه من التطبيقات الأخيرة أثناء الرحلة.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Color(0xFF5C7188),
+                fontWeight: FontWeight.w800,
+                height: 1.7,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: openBatterySettings,
+            icon: const Icon(Icons.battery_saver_rounded),
+            label: const Text('فتح إعدادات البطارية'),
+          ),
+          OutlinedButton.icon(
+            onPressed: openAppSettings,
+            icon: const Icon(Icons.settings_applications_rounded),
+            label: const Text('فتح إعدادات التطبيق'),
           ),
         ],
       ),
