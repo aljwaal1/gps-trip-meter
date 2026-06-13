@@ -10,9 +10,8 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 
-const String activeTripKey = 'active_trip_v3';
+const String activeTripKey = 'active_trip_practical_v3';
 const String nativeChannelName = 'gps_trip_meter/native';
-const String backgroundHeartbeatKey = 'background_heartbeat_v3';
 
 Map<String, dynamic> positionToMap(Position? p) {
   if (p == null) return {};
@@ -164,19 +163,15 @@ void startCallback() {
 class GpsTaskHandler extends TaskHandler {
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(backgroundHeartbeatKey, DateTime.now().millisecondsSinceEpoch);
     await updateActiveTripFromBackground();
   }
 
   @override
-  void onRepeatEvent(DateTime timestamp) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(backgroundHeartbeatKey, DateTime.now().millisecondsSinceEpoch);
-    await updateActiveTripFromBackground();
+  void onRepeatEvent(DateTime timestamp) {
+    updateActiveTripFromBackground();
     FlutterForegroundTask.updateService(
-      notificationTitle: 'عداد رحلات GPS يعمل في الخلفية',
-      notificationText: 'تسجيل الرحلة مستمر • لا تغلق التطبيق',
+      notificationTitle: 'عداد رحلات GPS يعمل بهدوء',
+      notificationText: 'يتم حفظ الرحلة تلقائيًا عند التوقف',
     );
   }
 
@@ -327,11 +322,9 @@ class _HomeScreenState extends State<HomeScreen> {
   StreamSubscription<Position>? positionSub;
   Timer? timer;
   Timer? activeSaveTimer;
-  Timer? watchdogTimer;
 
   bool running = false;
   bool restoredUnclosedTrip = false;
-  int lastHeartbeatMs = 0;
   String status = 'اضغط تشغيل للبدء';
 
   DateTime? startTime;
@@ -358,7 +351,6 @@ class _HomeScreenState extends State<HomeScreen> {
     positionSub?.cancel();
     timer?.cancel();
     activeSaveTimer?.cancel();
-    watchdogTimer?.cancel();
     super.dispose();
   }
 
@@ -368,15 +360,15 @@ class _HomeScreenState extends State<HomeScreen> {
         channelId: 'gps_trip_meter_channel',
         channelName: 'عداد رحلات GPS',
         channelDescription: 'إشعار تتبع الرحلات بالخلفية',
-        channelImportance: NotificationChannelImportance.HIGH,
-        priority: NotificationPriority.HIGH,
+        channelImportance: NotificationChannelImportance.LOW,
+        priority: NotificationPriority.LOW,
       ),
       iosNotificationOptions: const IOSNotificationOptions(
         showNotification: false,
         playSound: false,
       ),
       foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.repeat(3000),
+        eventAction: ForegroundTaskEventAction.repeat(10000),
         autoRunOnBoot: false,
         allowWakeLock: true,
         allowWifiLock: false,
@@ -389,13 +381,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (await FlutterForegroundTask.isRunningService) {
       await FlutterForegroundTask.updateService(
-        notificationTitle: 'عداد رحلات GPS يعمل في الخلفية',
-        notificationText: 'تسجيل الرحلة مستمر • لا تغلق التطبيق',
+        notificationTitle: 'عداد رحلات GPS يعمل بهدوء',
+        notificationText: 'يتم حفظ الرحلة تلقائيًا عند التوقف',
       );
     } else {
       await FlutterForegroundTask.startService(
-        notificationTitle: 'عداد رحلات GPS يعمل في الخلفية',
-        notificationText: 'تسجيل الرحلة مستمر • لا تغلق التطبيق',
+        notificationTitle: 'عداد رحلات GPS يعمل بهدوء',
+        notificationText: 'يتم حفظ الرحلة تلقائيًا عند التوقف',
         callback: startCallback,
       );
     }
@@ -493,7 +485,7 @@ class _HomeScreenState extends State<HomeScreen> {
         child: AlertDialog(
           title: const Text('استعادة رحلة سابقة'),
           content: const Text(
-            'وجدنا رحلة لم يتم إيقافها بشكل طبيعي. يمكنك استكمالها من آخر بيانات محفوظة، أو حفظها في السجل، أو حذفها والبدء من جديد.',
+            'وجدنا رحلة لم تُغلق بشكل طبيعي. يمكنك استكمالها من آخر بيانات محفوظة، أو حفظها في السجل، أو حذفها والبدء من جديد.',
           ),
           actions: [
             TextButton(
@@ -543,7 +535,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     activeSaveTimer?.cancel();
-    activeSaveTimer = Timer.periodic(const Duration(seconds: 3), (_) => saveActiveTrip());
+    activeSaveTimer = Timer.periodic(const Duration(seconds: 5), (_) => saveActiveTrip());
 
     positionSub?.cancel();
 
@@ -563,7 +555,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
 
     await saveActiveTrip();
-    await startWatchdog();
     showSnack('تم استكمال GPS...');
   }
 
@@ -584,38 +575,6 @@ class _HomeScreenState extends State<HomeScreen> {
       bestAccuracy = (m['bestAccuracy'] ?? bestAccuracy).toDouble();
     } catch (_) {}
   }
-
-
-  Future<void> startWatchdog() async {
-    watchdogTimer?.cancel();
-    watchdogTimer = Timer.periodic(const Duration(seconds: 6), (_) async {
-      if (!running) return;
-
-      final prefs = await SharedPreferences.getInstance();
-      final hb = prefs.getInt(backgroundHeartbeatKey) ?? 0;
-      lastHeartbeatMs = hb;
-
-      // If foreground service heartbeat is stale, restart it quietly.
-      final stale = hb == 0 || DateTime.now().millisecondsSinceEpoch - hb > 15000;
-      if (stale) {
-        try {
-          await stopForeground();
-          await Future.delayed(const Duration(milliseconds: 500));
-          await startForeground();
-          await saveActiveTrip();
-        } catch (_) {}
-      }
-
-      await saveActiveTrip();
-
-      if (mounted && running) {
-        setState(() {
-          status = stale ? 'إعادة تنشيط الخلفية...' : status;
-        });
-      }
-    });
-  }
-
   Future<void> saveRestoredAsTrip() async {
     if (startTime == null) return;
     final durationMs = DateTime.now().difference(startTime!).inMilliseconds;
@@ -723,9 +682,8 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     activeSaveTimer?.cancel();
-    activeSaveTimer = Timer.periodic(const Duration(seconds: 3), (_) => saveActiveTrip());
+    activeSaveTimer = Timer.periodic(const Duration(seconds: 5), (_) => saveActiveTrip());
     await saveActiveTrip();
-    await startWatchdog();
 
     positionSub?.cancel();
 
@@ -754,7 +712,6 @@ class _HomeScreenState extends State<HomeScreen> {
     positionSub = null;
     timer?.cancel();
     activeSaveTimer?.cancel();
-    watchdogTimer?.cancel();
     await stopForeground();
 
     final durationMs =
@@ -795,7 +752,6 @@ class _HomeScreenState extends State<HomeScreen> {
     positionSub = null;
     timer?.cancel();
     activeSaveTimer?.cancel();
-    watchdogTimer?.cancel();
     await stopForeground();
 
     setState(() {
@@ -1375,9 +1331,9 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (_) => const Directionality(
         textDirection: TextDirection.rtl,
         child: AlertDialog(
-          title: Text('اختبار الخلفية 10 دقائق'),
+          title: Text('شرح تشغيل الخلفية'),
           content: Text(
-            'ابدأ الرحلة، ثم اخرج للشاشة الرئيسية واترك الهاتف 10 دقائق دون الضغط على Clear All. إذا بقي الإشعار ظاهرًا واستمر الوقت، فالخلفية تعمل. إذا ظهرت رسالة استعادة، فالنظام أوقف التطبيق.',
+            'على بعض الأجهزة قد يوقف النظام التطبيق بعد دقائق. لا مشكلة: التطبيق يحفظ الرحلة باستمرار، وعند فتحه يعرض استكمال الرحلة أو حفظها. لا تضغط Clear All أثناء الرحلة.',
           ),
         ),
       ),
@@ -1395,7 +1351,7 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.all(13),
             decoration: lightBoxDecoration(20),
             child: const Text(
-              'لرحلات طويلة: اضغط زر السماح بالتشغيل في الخلفية، ثم اجعل التطبيق غير مقيّد أو غير محسّن من إعدادات البطارية. لا تغلقه من التطبيقات الأخيرة أثناء الرحلة.',
+              'هذه نسخة عملية هادئة: التطبيق يحفظ الرحلة باستمرار، وإذا أوقفه النظام يمكنك استعادتها. لنتيجة أفضل اجعل التطبيق غير محسّن للبطارية ولا تضغط Clear All أثناء الرحلة.',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: Color(0xFF5C7188),
@@ -1418,7 +1374,7 @@ class _HomeScreenState extends State<HomeScreen> {
           OutlinedButton.icon(
             onPressed: showBackgroundTestInfo,
             icon: const Icon(Icons.timer_rounded),
-            label: const Text('اختبار الخلفية 10 دقائق'),
+            label: const Text('شرح تشغيل الخلفية'),
           ),
         ],
       ),
