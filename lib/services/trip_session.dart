@@ -4,7 +4,7 @@ import 'dart:io' show Platform;
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart' show DartPluginRegistrant;
+import 'dart:ui' show DartPluginRegistrant;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -630,7 +630,7 @@ Future<void> updateActiveTripFromBackground() async {
 
   final valid = !warmingUp && !badAccuracy && !impossibleSpeed && oldPos != null;
 
-  if (valid && oldPos != null) {
+  if (valid) {
     if (kmh > maxSpeed) maxSpeed = kmh;
     final d = distanceKm(oldPos, pos);
     final dtSeconds = pos.timestamp.difference(oldPos.timestamp).inMilliseconds / 1000.0;
