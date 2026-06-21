@@ -1,19 +1,29 @@
-name: Build Android APK
+name: Build APK Direct
+
+concurrency:
+  group: build-apk-direct
+  cancel-in-progress: true
 
 on:
-  workflow_dispatch:
   push:
     branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Java 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -24,8 +34,12 @@ jobs:
         with:
           channel: stable
 
-      - name: Create Android project files
-        run: flutter create --platforms android .
+      - name: Prepare Flutter Android project
+        run: |
+          flutter --version
+          flutter create --platforms=android --org com.explapp .
+          rm -f test/widget_test.dart
+          flutter pub get
 
       - name: Write Android Manifest
         run: |
@@ -38,6 +52,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
               <application
                   android:label="عداد رحلات GPS"
@@ -74,14 +89,45 @@ jobs:
           </manifest>
           EOF
 
-      - name: Get packages
-        run: flutter pub get
+      - name: Set Android minSdk
+        run: |
+          if [ -f android/app/build.gradle.kts ]; then
+            perl -0pi -e 's/minSdk\s*=\s*flutter\.minSdkVersion/minSdk = 23/g' android/app/build.gradle.kts
+          fi
+          if [ -f android/app/build.gradle ]; then
+            perl -0pi -e 's/minSdkVersion\s+flutter\.minSdkVersion/minSdkVersion 23/g' android/app/build.gradle
+          fi
 
-      - name: Build release APK
-        run: flutter build apk --release
+      - name: Analyze project
+        run: |
+          flutter analyze --no-fatal-infos --no-fatal-warnings
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: gps-trip-meter-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+      - name: Build APK
+        run: |
+          flutter build apk --release --no-tree-shake-icons
+
+      - name: Copy APK to apk folder
+        run: |
+          mkdir -p apk
+          cp build/app/outputs/flutter-apk/app-release.apk apk/gps-trip-meter.apk
+
+      - name: Update download file
+        run: |
+          echo "# تحميل التطبيق" > DOWNLOAD_APK.md
+          echo "" >> DOWNLOAD_APK.md
+          echo "آخر نسخة APK مباشرة:" >> DOWNLOAD_APK.md
+          echo "" >> DOWNLOAD_APK.md
+          echo "https://github.com/${{ github.repository }}/raw/main/apk/gps-trip-meter.apk" >> DOWNLOAD_APK.md
+
+      - name: Commit APK
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main || true
+          git pull --rebase --autostash origin main || true
+
+          git add apk/gps-trip-meter.apk DOWNLOAD_APK.md
+          git commit -m "Update direct APK" || echo "No changes to commit"
+
+          git push origin HEAD:${{ github.ref_name }}
