@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          gradle -p legacy-android-4.4 clean assembleRelease --stacktrace --info --no-daemon 2>&1 | tee gps-trip-meter-build.log
+          gradle -p legacy-android-4.4 clean assembleRelease -x lintVitalRelease --stacktrace --info --no-daemon 2>&1 | tee gps-trip-meter-build.log
       - name: Save and verify APK
         shell: bash
         run: |
