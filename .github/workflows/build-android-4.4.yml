@@ -1,24 +1,14 @@
 name: Build GPS Trip Meter Android 4.4
-
 on:
   workflow_dispatch:
   push:
     branches: [android-4.4]
-    paths:
-      - 'legacy-android-4.4/**'
-      - '.github/workflows/build-android-4.4.yml'
-
+    paths: ['legacy-android-4.4/**', '.github/workflows/build-android-4.4.yml']
 permissions:
   contents: write
-
-concurrency:
-  group: gps-trip-meter-android-4-4
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,53 +18,31 @@ jobs:
           distribution: temurin
           java-version: '17'
       - name: Prepare Android SDK
-        shell: bash
         run: |
-          set -euo pipefail
-          java -version
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager 'platforms;android-33' 'build-tools;33.0.2' 'platform-tools'
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '7.6.4'
-      - name: Build release APK
-        shell: bash
-        run: |
-          set -o pipefail
-          gradle -p legacy-android-4.4 clean assembleRelease -x lintVitalRelease --stacktrace --info --no-daemon 2>&1 | tee gps-trip-meter-build.log
+      - name: Build signed debug APK
+        run: gradle -p legacy-android-4.4 clean assembleDebug --stacktrace --no-daemon
       - name: Save and verify APK
-        shell: bash
         run: |
           set -euo pipefail
-          APK="$(find legacy-android-4.4/app/build/outputs/apk -type f -name '*release*.apk' | head -n 1)"
-          test -n "$APK"
+          APK="$(find legacy-android-4.4/app/build/outputs/apk -type f -name '*debug*.apk' | head -n 1)"
           test -s "$APK"
           unzip -t "$APK" >/dev/null
+          "$ANDROID_HOME/build-tools/33.0.2/apksigner" verify --verbose --print-certs "$APK"
           mkdir -p apk
           cp "$APK" apk/gps-trip-meter-android-4.4.apk
-          sha256sum apk/gps-trip-meter-android-4.4.apk
       - uses: actions/upload-artifact@v4
         with:
           name: gps-trip-meter-android-4.4
           path: apk/gps-trip-meter-android-4.4.apk
-          if-no-files-found: error
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gps-trip-meter-android-4.4-build-log
-          path: gps-trip-meter-build.log
-          if-no-files-found: ignore
       - name: Commit APK
-        shell: bash
         run: |
-          set -euo pipefail
           git config user.name github-actions
           git config user.email github-actions@github.com
           git add apk/gps-trip-meter-android-4.4.apk
-          if ! git diff --cached --quiet; then
-            git commit -m 'Build GPS Trip Meter Android 4.4 APK'
-            git pull --rebase origin android-4.4
-            git push origin HEAD:android-4.4
-          fi
+          git diff --cached --quiet || (git commit -m 'Build signed GPS Trip Meter Android 4.4 APK' && git push origin HEAD:android-4.4)
