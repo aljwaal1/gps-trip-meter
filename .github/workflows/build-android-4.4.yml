@@ -1,0 +1,47 @@
+name: Build GPS Trip Meter Android 4.4
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [android-4.4]
+    paths:
+      - 'legacy-android-4.4/**'
+      - '.github/workflows/build-android-4.4.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: android-4.4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK 33
+        run: yes | sdkmanager --licenses >/dev/null && sdkmanager 'platforms;android-33' 'build-tools;33.0.2'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '7.6.4'
+      - name: Build legacy APK
+        run: gradle -p legacy-android-4.4 clean assembleRelease --stacktrace --no-daemon
+      - name: Save APK
+        run: |
+          test -f legacy-android-4.4/app/build/outputs/apk/release/app-release.apk
+          mkdir -p apk
+          cp legacy-android-4.4/app/build/outputs/apk/release/app-release.apk apk/gps-trip-meter-android-4.4.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gps-trip-meter-android-4.4
+          path: apk/gps-trip-meter-android-4.4.apk
+      - name: Commit APK
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add apk/gps-trip-meter-android-4.4.apk
+          git diff --cached --quiet || (git commit -m 'Build GPS Trip Meter Android 4.4 APK' && git push origin android-4.4)
