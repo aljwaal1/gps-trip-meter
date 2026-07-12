@@ -150,7 +150,7 @@ public class MainActivity extends Activity implements LocationListener {
         refreshDashboard(); saveSession();
     }
 
-    private void addElapsed() { if (tracking && startedAt > 0) { trackedSeconds += Math.max(0, (System.currentTimeMillis() - startedAt) / 1000L); startedAt = System.currentTimeMillis(); } }
+    private void addElapsed() { if (tracking && startedAt > 0) { long wholeSeconds = Math.max(0, (System.currentTimeMillis() - startedAt) / 1000L); if (wholeSeconds > 0) { trackedSeconds += wholeSeconds; startedAt += wholeSeconds * 1000L; } } }
     private void resetTrip() {
         if (tracking) pauseTracking(); totalMeters = 0f; maxSpeedKmh = 0f; trackedSeconds = 0; lastLocation = null;
         statusView.setText("تم تصفير الرحلة. اضغط بدء الرحلة للتسجيل."); refreshDashboard(); saveSession();
