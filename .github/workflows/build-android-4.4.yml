@@ -25,8 +25,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '7.6.4'
-      - name: Build signed debug APK
-        run: gradle -p legacy-android-4.4 clean assembleDebug --stacktrace --no-daemon
+      - name: Lint and build signed debug APK
+        run: gradle -p legacy-android-4.4 clean lintDebug assembleDebug --stacktrace --no-daemon
       - name: Save and verify APK
         run: |
           set -euo pipefail

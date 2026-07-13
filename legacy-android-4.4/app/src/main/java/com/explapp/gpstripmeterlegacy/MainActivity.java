@@ -19,12 +19,14 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.util.Locale;
@@ -41,13 +43,14 @@ public class MainActivity extends Activity implements LocationListener {
     private SpeedGauge speedGauge;
     private LocationManager locationManager;
     private Location lastLocation;
-    private float totalMeters, maxSpeedKmh;
+    private float totalMeters, maxSpeedKmh, currentSpeedKmh;
     private long trackedSeconds, startedAt;
+    private long lastSavedSecond;
     private boolean tracking;
     private final Handler dashboardHandler = new Handler();
     private final Runnable dashboardTick = new Runnable() {
         @Override public void run() {
-            if (tracking) { addElapsed(); refreshDashboard(); saveSession(); }
+            if (tracking && startedAt > 0) { addElapsed(); refreshDashboard(); saveSessionThrottled(); }
             dashboardHandler.postDelayed(this, 1000L);
         }
     };
@@ -64,7 +67,8 @@ public class MainActivity extends Activity implements LocationListener {
     private void buildScreen() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(14), dp(14), dp(14), dp(12));
+        root.setPadding(dp(12), dp(12), dp(12), dp(12));
+        if (android.os.Build.VERSION.SDK_INT >= 17) root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         GradientDrawable background = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
                 new int[]{Color.rgb(7, 17, 31), Color.rgb(15, 45, 66)});
         root.setBackground(background);
@@ -78,7 +82,8 @@ public class MainActivity extends Activity implements LocationListener {
         root.addView(subtitle, match());
 
         speedGauge = new SpeedGauge(this);
-        root.addView(speedGauge, new LinearLayout.LayoutParams(-1, dp(230)));
+        int heightDp = (int) (getResources().getDisplayMetrics().heightPixels / getResources().getDisplayMetrics().density);
+        root.addView(speedGauge, new LinearLayout.LayoutParams(-1, dp(heightDp < 560 ? 190 : 220)));
 
         LinearLayout stats = new LinearLayout(this);
         stats.setOrientation(LinearLayout.HORIZONTAL);
@@ -107,27 +112,29 @@ public class MainActivity extends Activity implements LocationListener {
         secondary.addView(reset, weight());
         secondary.addView(space(8), fixed(8));
         Button settings = button("إعدادات GPS", Color.rgb(54, 91, 125));
-        settings.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)); } });
+        settings.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { try { startActivity(new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)); } catch (Exception ignored) { statusView.setText("تعذر فتح إعدادات الموقع على هذا الجهاز"); } } });
         secondary.addView(settings, weight());
         root.addView(secondary, match());
 
-        TextView footer = text("يتم حفظ الرحلة الحالية تلقائيًا على هذا الجهاز.", 12, Color.rgb(141, 175, 199), false);
+        TextView footer = text("تُحفظ الرحلة تلقائيًا، ويتوقف GPS عند مغادرة التطبيق لتوفير البطارية.", 12, Color.rgb(141, 175, 199), false);
         footer.setGravity(Gravity.CENTER); footer.setPadding(0, dp(12), 0, 0); root.addView(footer, match());
-        setContentView(root);
+        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.setBackgroundColor(Color.rgb(7, 17, 31)); scroll.addView(root); setContentView(scroll);
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
     }
 
     private void toggleTracking() { if (tracking) pauseTracking(); else beginTracking(); }
 
     private void beginTracking() {
-        tracking = true; startedAt = System.currentTimeMillis(); lastLocation = null;
-        if (!hasLocationPermission()) { requestLocationPermission(); return; }
+        if (!hasLocationPermission()) { tracking = false; startedAt = 0; requestLocationPermission(); return; }
+        tracking = true; lastLocation = null; currentSpeedKmh = 0f;
+        startedAt = SystemClock.elapsedRealtime();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         startTracking(); refreshDashboard(); saveSession();
     }
 
     private void startTracking() {
         if (!hasLocationPermission()) { requestLocationPermission(); return; }
+        if (startedAt <= 0) startedAt = SystemClock.elapsedRealtime();
         try {
             locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 1f, this);
             locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 3000L, 5f, this);
@@ -136,7 +143,7 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void pauseTracking() {
-        addElapsed(); tracking = false; lastLocation = null;
+        addElapsed(); tracking = false; startedAt = 0; lastLocation = null; currentSpeedKmh = 0f;
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (locationManager != null) try { locationManager.removeUpdates(this); } catch (Exception ignored) { }
         statusView.setText("الرحلة متوقفة مؤقتًا — يمكنك المتابعة لاحقًا"); refreshDashboard(); saveSession();
@@ -152,23 +159,34 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     @Override public void onLocationChanged(Location location) {
-        if (!tracking) return;
+        if (!tracking || startedAt <= 0) return;
         addElapsed();
-        if (location.hasAccuracy() && location.getAccuracy() > 60f) { statusView.setText("إشارة ضعيفة: دقة " + Math.round(location.getAccuracy()) + " م"); refreshDashboard(); return; }
+        if (location.hasAccuracy() && location.getAccuracy() > 35f) { statusView.setText("إشارة ضعيفة: دقة " + Math.round(location.getAccuracy()) + " م"); refreshDashboard(); return; }
+        if (location.getTime() > 0 && System.currentTimeMillis() - location.getTime() > 15000L) return;
         float speed = location.hasSpeed() ? location.getSpeed() * 3.6f : 0f;
         if (speed > 240f) { statusView.setText("تم تجاهل قراءة سرعة غير واقعية"); return; }
-        if (speed > maxSpeedKmh) maxSpeedKmh = speed;
         if (lastLocation != null) {
             float delta = lastLocation.distanceTo(location);
-            long gap = Math.abs(location.getTime() - lastLocation.getTime());
-            if (delta >= 1f && delta < 180f && gap <= 30000L) totalMeters += delta;
+            long gap = location.getTime() - lastLocation.getTime();
+            if (gap <= 0) return;
+            float seconds = gap / 1000f;
+            float noiseFloor = Math.max(2.5f, Math.max(location.getAccuracy(), lastLocation.getAccuracy()) * .25f);
+            float plausibleLimit = 20f + seconds * 75f;
+            boolean accepted = gap <= 30000L && delta >= noiseFloor && delta <= plausibleLimit;
+            if (accepted) {
+                totalMeters += delta;
+                if (!location.hasSpeed()) speed = delta / seconds * 3.6f;
+            } else if (!location.hasSpeed()) speed = 0f;
         }
+        currentSpeedKmh = Math.max(0f, Math.min(240f, speed));
+        if (currentSpeedKmh > maxSpeedKmh) maxSpeedKmh = currentSpeedKmh;
         lastLocation = location;
-        statusView.setText("GPS متصل • الدقة " + Math.round(location.getAccuracy()) + " م");
-        refreshDashboard(); saveSession();
+        String source = LocationManager.GPS_PROVIDER.equals(location.getProvider()) ? "GPS" : "الشبكة";
+        statusView.setText(source + " متصل • الدقة " + Math.round(location.getAccuracy()) + " م");
+        refreshDashboard(); saveSessionThrottled();
     }
 
-    private void addElapsed() { if (tracking && startedAt > 0) { long wholeSeconds = Math.max(0, (System.currentTimeMillis() - startedAt) / 1000L); if (wholeSeconds > 0) { trackedSeconds += wholeSeconds; startedAt += wholeSeconds * 1000L; } } }
+    private void addElapsed() { if (tracking && startedAt > 0) { long wholeSeconds = Math.max(0, (SystemClock.elapsedRealtime() - startedAt) / 1000L); if (wholeSeconds > 0) { trackedSeconds += wholeSeconds; startedAt += wholeSeconds * 1000L; } } }
     private void resetTrip() {
         if (tracking) pauseTracking(); totalMeters = 0f; maxSpeedKmh = 0f; trackedSeconds = 0; lastLocation = null;
         statusView.setText("تم تصفير الرحلة. اضغط بدء الرحلة للتسجيل."); refreshDashboard(); saveSession();
@@ -185,8 +203,7 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private void refreshDashboard() {
-        float currentSpeed = tracking && lastLocation != null && lastLocation.hasSpeed() ? lastLocation.getSpeed() * 3.6f : 0f;
-        speedGauge.setSpeed(currentSpeed);
+        speedGauge.setSpeed(tracking ? currentSpeedKmh : 0f);
         distanceView.setText("المسافة\n" + String.format(Locale.US, "%.2f كم", totalMeters / 1000f));
         timeView.setText("المدة\n" + formatDuration(trackedSeconds));
         maxSpeedView.setText("الأعلى\n" + String.format(Locale.US, "%.0f كم/س", maxSpeedKmh));
@@ -195,20 +212,22 @@ public class MainActivity extends Activity implements LocationListener {
     }
 
     private String formatDuration(long seconds) { return String.format(Locale.US, "%02d:%02d", seconds / 60L, seconds % 60L); }
-    private void loadSession() { SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE); totalMeters = p.getFloat(KEY_DISTANCE, 0f); trackedSeconds = p.getLong(KEY_SECONDS, 0L); maxSpeedKmh = p.getFloat(KEY_MAX_SPEED, 0f); tracking = false; }
-    private void saveSession() { getSharedPreferences(PREFS, MODE_PRIVATE).edit().putFloat(KEY_DISTANCE, totalMeters).putLong(KEY_SECONDS, trackedSeconds).putFloat(KEY_MAX_SPEED, maxSpeedKmh).putBoolean(KEY_RUNNING, tracking).apply(); }
+    private void loadSession() { SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE); totalMeters = p.getFloat(KEY_DISTANCE, 0f); trackedSeconds = p.getLong(KEY_SECONDS, 0L); maxSpeedKmh = p.getFloat(KEY_MAX_SPEED, 0f); lastSavedSecond = trackedSeconds; tracking = false; }
+    private void saveSessionThrottled() { if (trackedSeconds - lastSavedSecond >= 10L) saveSession(); }
+    private void saveSession() { lastSavedSecond = trackedSeconds; getSharedPreferences(PREFS, MODE_PRIVATE).edit().putFloat(KEY_DISTANCE, totalMeters).putLong(KEY_SECONDS, trackedSeconds).putFloat(KEY_MAX_SPEED, maxSpeedKmh).putBoolean(KEY_RUNNING, false).apply(); }
 
     @Override public void onProviderEnabled(String provider) { statusView.setText("تم تفعيل " + provider); }
-    @Override public void onProviderDisabled(String provider) { statusView.setText("فعّل الموقع من الإعدادات لاستمرار التتبع"); }
+    @Override public void onProviderDisabled(String provider) { if (LocationManager.GPS_PROVIDER.equals(provider)) statusView.setText("GPS مغلق؛ قد تكون قراءة الشبكة أقل دقة"); }
     @Override public void onStatusChanged(String provider, int status, Bundle extras) { }
-    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) { super.onRequestPermissionsResult(requestCode, permissions, results); if (requestCode == REQ_LOCATION && results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) { startTracking(); refreshDashboard(); } else { tracking = false; statusView.setText("صلاحية الموقع مطلوبة لتسجيل الرحلة"); refreshDashboard(); } }
-    @Override protected void onPause() { super.onPause(); if (tracking) { addElapsed(); saveSession(); } }
-    @Override protected void onDestroy() { dashboardHandler.removeCallbacksAndMessages(null); super.onDestroy(); if (locationManager != null) try { locationManager.removeUpdates(this); } catch (Exception ignored) { } }
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) { super.onRequestPermissionsResult(requestCode, permissions, results); if (requestCode == REQ_LOCATION && results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) { tracking = true; startedAt = SystemClock.elapsedRealtime(); getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); startTracking(); refreshDashboard(); saveSession(); } else if (requestCode == REQ_LOCATION) { tracking = false; startedAt = 0; statusView.setText("صلاحية الموقع مطلوبة لتسجيل الرحلة"); refreshDashboard(); } }
+    @Override protected void onResume() { super.onResume(); dashboardHandler.removeCallbacks(dashboardTick); dashboardHandler.post(dashboardTick); if (tracking) { startedAt = SystemClock.elapsedRealtime(); getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); startTracking(); statusView.setText("تم استئناف تسجيل الرحلة"); } }
+    @Override protected void onPause() { dashboardHandler.removeCallbacks(dashboardTick); if (tracking) { addElapsed(); startedAt = 0; lastLocation = null; currentSpeedKmh = 0f; saveSession(); if (locationManager != null) try { locationManager.removeUpdates(this); } catch (Exception ignored) { } getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); } super.onPause(); }
+    @Override protected void onDestroy() { dashboardHandler.removeCallbacksAndMessages(null); if (locationManager != null) try { locationManager.removeUpdates(this); } catch (Exception ignored) { } super.onDestroy(); }
 
     private LinearLayout card() { LinearLayout c = new LinearLayout(this); c.setPadding(dp(14), dp(14), dp(14), dp(14)); c.setBackground(round(Color.rgb(27, 49, 67), 22)); return c; }
     private TextView statCard(String label, String value) { TextView v = text(label + "\n" + value, 15, Color.WHITE, true); v.setGravity(Gravity.CENTER); v.setPadding(dp(4), dp(15), dp(4), dp(15)); v.setBackground(round(Color.rgb(30, 57, 78), 16)); return v; }
     private TextView text(String value, int size, int color, boolean bold) { TextView t = new TextView(this); t.setText(value); t.setTextSize(size); t.setTextColor(color); t.setTypeface(Typeface.DEFAULT, bold ? Typeface.BOLD : Typeface.NORMAL); return t; }
-    private Button button(String label, int color) { Button b = new Button(this); b.setText(label); b.setTextColor(Color.WHITE); b.setTextSize(17); b.setAllCaps(false); b.setTypeface(Typeface.DEFAULT, Typeface.BOLD); b.setBackground(round(color, 16)); return b; }
+    private Button button(String label, int color) { Button b = new Button(this); b.setText(label); b.setTextColor(Color.WHITE); b.setTextSize(17); b.setAllCaps(false); b.setTypeface(Typeface.DEFAULT, Typeface.BOLD); b.setMinHeight(dp(52)); b.setBackground(round(color, 16)); return b; }
     private GradientDrawable round(int color, int radius) { GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(radius)); return d; }
     private int dp(int value) { return (int) (value * getResources().getDisplayMetrics().density + 0.5f); }
     private View space(int width) { View v = new View(this); v.setLayoutParams(fixed(width)); return v; }
