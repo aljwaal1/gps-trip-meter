@@ -1,6 +1,7 @@
 package com.explapp.gpstripmeterlegacy;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
@@ -132,6 +133,7 @@ public class MainActivity extends Activity implements LocationListener {
         startTracking(); refreshDashboard(); saveSession();
     }
 
+    @SuppressLint("MissingPermission")
     private void startTracking() {
         if (!hasLocationPermission()) { requestLocationPermission(); return; }
         if (startedAt <= 0) startedAt = SystemClock.elapsedRealtime();
