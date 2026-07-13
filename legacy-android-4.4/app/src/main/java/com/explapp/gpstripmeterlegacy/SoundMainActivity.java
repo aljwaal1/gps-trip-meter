@@ -3,21 +3,25 @@ package com.explapp.gpstripmeterlegacy;
 import android.media.AudioManager;
 import android.media.ToneGenerator;
 import android.os.Bundle;
+import android.os.Handler;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.TextView;
 
-/** Lightweight interaction sounds for the Android 4.4 build. */
+/** App-specific interaction and GPS-state sounds for the Android 4.4 build. */
 public class SoundMainActivity extends MainActivity {
+    private final Handler observer = new Handler();
     private ToneGenerator tones;
     private float downX;
     private float downY;
     private long lastSoundAt;
+    private String lastState = "";
 
     @Override public void onCreate(Bundle savedInstanceState) {
         tones = new ToneGenerator(AudioManager.STREAM_MUSIC, 48);
         super.onCreate(savedInstanceState);
+        observer.post(statusWatcher);
     }
 
     @Override public boolean dispatchTouchEvent(MotionEvent event) {
@@ -34,17 +38,75 @@ public class SoundMainActivity extends MainActivity {
     }
 
     private void playFor(View view) {
-        if (tones == null || System.currentTimeMillis() - lastSoundAt < 70L) return;
-        lastSoundAt = System.currentTimeMillis();
         String text = view instanceof TextView ? ((TextView) view).getText().toString() : "";
-        if (containsAny(text, "بدء", "تشغيل", "حفظ", "استكمال")) {
-            tones.startTone(ToneGenerator.TONE_PROP_ACK, 115);
-        } else if (containsAny(text, "إيقاف", "إيقاف مؤقت", "رجوع", "العودة")) {
-            tones.startTone(ToneGenerator.TONE_PROP_BEEP2, 85);
-        } else if (containsAny(text, "حذف", "مسح", "إلغاء")) {
-            tones.startTone(ToneGenerator.TONE_PROP_NACK, 110);
+        if (containsAny(text, "بدء الرحلة", "متابعة الرحلة")) {
+            play(ToneGenerator.TONE_PROP_ACK, 120);
+        } else if (containsAny(text, "إيقاف مؤقت")) {
+            play(ToneGenerator.TONE_PROP_BEEP2, 90);
+        } else if (containsAny(text, "حفظ وإنهاء")) {
+            play(ToneGenerator.TONE_CDMA_CONFIRM, 120);
+        } else if (containsAny(text, "حذف", "مسح", "تصفير", "إلغاء")) {
+            play(ToneGenerator.TONE_PROP_NACK, 115);
+        } else if (containsAny(text, "العداد", "الرحلات", "الإعدادات")) {
+            play(ToneGenerator.TONE_DTMF_5, 68);
+        } else if (containsAny(text, "GPS", "الموقع")) {
+            play(ToneGenerator.TONE_DTMF_6, 72);
+        } else if (containsAny(text, "رجوع", "العودة")) {
+            play(ToneGenerator.TONE_PROP_BEEP2, 80);
         } else {
-            tones.startTone(ToneGenerator.TONE_PROP_BEEP, 60);
+            play(ToneGenerator.TONE_PROP_BEEP, 58);
+        }
+    }
+
+    private final Runnable statusWatcher = new Runnable() {
+        @Override public void run() {
+            if (tones == null) return;
+            String snapshot = collectText(getWindow().getDecorView());
+            String state = stateFrom(snapshot);
+            if (lastState.length() == 0) {
+                lastState = state;
+            } else if (state.length() > 0 && !state.equals(lastState)) {
+                if ("connected".equals(state)) {
+                    play(ToneGenerator.TONE_PROP_ACK, 120);
+                } else if ("recording".equals(state)) {
+                    play(ToneGenerator.TONE_CDMA_CONFIRM, 95);
+                } else if ("paused".equals(state)) {
+                    play(ToneGenerator.TONE_PROP_BEEP2, 95);
+                } else if ("weak".equals(state)) {
+                    play(ToneGenerator.TONE_CDMA_NETWORK_BUSY_ONE_SHOT, 120);
+                } else if ("error".equals(state)) {
+                    play(ToneGenerator.TONE_PROP_NACK, 150);
+                } else if ("reset".equals(state)) {
+                    play(ToneGenerator.TONE_PROP_ACK, 130);
+                }
+                lastState = state;
+            }
+            observer.postDelayed(this, 320L);
+        }
+    };
+
+    private String stateFrom(String text) {
+        if (containsAny(text, "GPS متصل", "الشبكة متصل")) return "connected";
+        if (containsAny(text, "جاري تسجيل الرحلة", "تم استئناف تسجيل الرحلة")) return "recording";
+        if (containsAny(text, "متوقفة مؤقتًا")) return "paused";
+        if (containsAny(text, "إشارة ضعيفة")) return "weak";
+        if (containsAny(text, "GPS مغلق", "تعذر تشغيل GPS", "صلاحية الموقع مطلوبة", "تعذر فتح إعدادات")) return "error";
+        if (containsAny(text, "تم تصفير الرحلة")) return "reset";
+        return "idle";
+    }
+
+    private String collectText(View view) {
+        StringBuilder builder = new StringBuilder();
+        appendText(view, builder);
+        return builder.toString();
+    }
+
+    private void appendText(View view, StringBuilder builder) {
+        if (view == null || view.getVisibility() != View.VISIBLE) return;
+        if (view instanceof TextView) builder.append('|').append(((TextView) view).getText());
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) appendText(group.getChildAt(i), builder);
         }
     }
 
@@ -64,12 +126,24 @@ public class SoundMainActivity extends MainActivity {
         return view;
     }
 
+    private void play(int tone, int durationMs) {
+        if (tones == null || System.currentTimeMillis() - lastSoundAt < 75L) return;
+        lastSoundAt = System.currentTimeMillis();
+        tones.startTone(tone, durationMs);
+    }
+
     private boolean containsAny(String text, String... words) {
         for (String word : words) if (text.contains(word)) return true;
         return false;
     }
 
+    @Override public void onBackPressed() {
+        play(ToneGenerator.TONE_PROP_BEEP2, 80);
+        super.onBackPressed();
+    }
+
     @Override protected void onDestroy() {
+        observer.removeCallbacksAndMessages(null);
         if (tones != null) {
             tones.release();
             tones = null;
