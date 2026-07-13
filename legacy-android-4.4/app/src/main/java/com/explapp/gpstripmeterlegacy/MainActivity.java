@@ -46,7 +46,7 @@ public class MainActivity extends Activity implements LocationListener {
     private static final String KEY_RUNNING = "running";
     private static final String KEY_HISTORY = "history";
 
-    private TextView distanceView, timeView, maxSpeedView, statusView, startButton;
+    private TextView distanceView, timeView, maxSpeedView, averageSpeedView, statusView, startButton;
     private SpeedGauge speedGauge;
     private LocationManager locationManager;
     private Location lastLocation;
@@ -128,6 +128,12 @@ public class MainActivity extends Activity implements LocationListener {
         stats.addView(distanceView, weight()); stats.addView(space(8), fixed(8));
         stats.addView(timeView, weight()); stats.addView(space(8), fixed(8)); stats.addView(maxSpeedView, weight());
         root.addView(stats, match());
+
+        averageSpeedView = statCard("متوسط السرعة", "0 كم/س");
+        averageSpeedView.setPadding(dp(4), dp(9), dp(4), dp(9));
+        LinearLayout.LayoutParams averageParams = match();
+        averageParams.bottomMargin = dp(8);
+        root.addView(averageSpeedView, averageParams);
 
         statusView = text("بانتظار بدء الرحلة", 15, Color.rgb(226, 239, 249), false);
         statusView.setGravity(Gravity.CENTER);
