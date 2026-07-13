@@ -8,8 +8,8 @@ android {
         applicationId 'com.explapp.gpstripmeterlegacy'
         minSdk 19
         targetSdk 28
-        versionCode 1
-        versionName '1.0.0-legacy'
+        versionCode 2
+        versionName '2.0.0-legacy'
     }
 
     buildTypes { release { minifyEnabled false } }
