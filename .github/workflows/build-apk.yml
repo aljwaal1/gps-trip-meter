@@ -29,9 +29,13 @@ jobs:
       - name: Merge GPS reliability fixes
         run: |
           python3 tools/merge_gps_error_cleanup.py
+          python3 tools/merge_background_update_guard.py
           grep -q '_handlePositionError' lib/services/trip_session.dart
           grep -q 'await stopForeground()' lib/services/trip_session.dart
+          grep -q '_backgroundUpdateInProgress' lib/services/trip_session.dart
+          grep -q '_runBackgroundUpdateOnce' lib/services/trip_session.dart
           test -f test/gps_error_cleanup_contract_test.dart
+          test -f test/background_update_guard_contract_test.dart
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -139,5 +143,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add lib/services/trip_session.dart apk/gps-trip-meter.apk DOWNLOAD_APK.md
-          git diff --cached --quiet || git commit -m "دمج موثوقية GPS وتحديث APK"
+          git diff --cached --quiet || git commit -m "دمج منع تداخل GPS وتحديث APK"
           git push origin HEAD:${{ github.ref_name }}
