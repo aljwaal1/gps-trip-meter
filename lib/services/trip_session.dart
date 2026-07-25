@@ -403,9 +403,23 @@ class TripSession extends ChangeNotifier {
   }
 
   void _onPositionError(Object error) {
-    running = false;
-    status = 'خطأ في GPS';
+    unawaited(_handlePositionError(error));
+  }
+
+  Future<void> _handlePositionError(Object error) async {
+    if (!running) return;
+
+    // Persist the latest recoverable state before changing [running], because
+    // saveActiveTrip intentionally ignores inactive sessions.
+    await saveActiveTrip(force: true);
+    await _positionSub?.cancel();
+    _positionSub = null;
     _stopTimers();
+    await stopForeground();
+
+    running = false;
+    currentSpeed = 0;
+    status = 'توقف GPS مؤقتًا — يمكن استكمال الرحلة';
     notifyListeners();
   }
 
@@ -628,12 +642,14 @@ Future<void> updateActiveTripFromBackground() async {
   final badAccuracy = pos.accuracy > 40;
   final impossibleSpeed = kmh > info.maxValidSpeed;
 
-  final valid = !warmingUp && !badAccuracy && !impossibleSpeed && oldPos != null;
+  final valid =
+      !warmingUp && !badAccuracy && !impossibleSpeed && oldPos != null;
 
   if (valid) {
     if (kmh > maxSpeed) maxSpeed = kmh;
     final d = distanceKm(oldPos, pos);
-    final dtSeconds = pos.timestamp.difference(oldPos.timestamp).inMilliseconds / 1000.0;
+    final dtSeconds =
+        pos.timestamp.difference(oldPos.timestamp).inMilliseconds / 1000.0;
     if (dtSeconds >= 1) {
       final jumpSpeed = d / (dtSeconds / 3600.0);
       if (d < 0.30 && jumpSpeed <= info.maxValidSpeed) {
