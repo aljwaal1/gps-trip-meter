@@ -7,6 +7,9 @@ concurrency:
 on:
   push:
     branches: [ "main", "master" ]
+    paths-ignore:
+      - 'apk/**'
+      - 'DOWNLOAD_APK.md'
   workflow_dispatch:
 
 permissions:
@@ -22,6 +25,13 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge GPS reliability fixes
+        run: |
+          python3 tools/merge_gps_error_cleanup.py
+          grep -q '_handlePositionError' lib/services/trip_session.dart
+          grep -q 'await stopForeground()' lib/services/trip_session.dart
+          test -f test/gps_error_cleanup_contract_test.dart
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -57,7 +67,9 @@ jobs:
               <application
                   android:label="عداد رحلات GPS"
                   android:name="${applicationName}"
-                  android:icon="@mipmap/ic_launcher">
+                  android:icon="@mipmap/ic_launcher"
+                  android:allowBackup="false"
+                  android:usesCleartextTraffic="false">
 
                   <service
                       android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
@@ -98,13 +110,16 @@ jobs:
             perl -0pi -e 's/minSdkVersion\s+flutter\.minSdkVersion/minSdkVersion 23/g' android/app/build.gradle
           fi
 
-      - name: Analyze project
+      - name: Format and analyze
         run: |
+          dart format lib test
           flutter analyze --no-fatal-infos --no-fatal-warnings
 
+      - name: Run tests
+        run: flutter test
+
       - name: Build APK
-        run: |
-          flutter build apk --release --no-tree-shake-icons
+        run: flutter build apk --release --no-tree-shake-icons
 
       - name: Copy APK to apk folder
         run: |
@@ -119,15 +134,10 @@ jobs:
           echo "" >> DOWNLOAD_APK.md
           echo "https://github.com/${{ github.repository }}/raw/main/apk/gps-trip-meter.apk" >> DOWNLOAD_APK.md
 
-      - name: Commit APK
+      - name: Commit merged source and APK
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git fetch origin main || true
-          git pull --rebase --autostash origin main || true
-
-          git add apk/gps-trip-meter.apk DOWNLOAD_APK.md
-          git commit -m "Update direct APK" || echo "No changes to commit"
-
+          git add lib/services/trip_session.dart apk/gps-trip-meter.apk DOWNLOAD_APK.md
+          git diff --cached --quiet || git commit -m "دمج موثوقية GPS وتحديث APK"
           git push origin HEAD:${{ github.ref_name }}
