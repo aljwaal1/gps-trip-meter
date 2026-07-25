@@ -678,18 +678,29 @@ void startCallback() {
 }
 
 class GpsTaskHandler extends TaskHandler {
+  bool _backgroundUpdateInProgress = false;
+
+  Future<void> _runBackgroundUpdateOnce() async {
+    if (_backgroundUpdateInProgress) return;
+    _backgroundUpdateInProgress = true;
+    try {
+      await updateActiveTripFromBackground();
+    } finally {
+      _backgroundUpdateInProgress = false;
+    }
+  }
+
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
-    await updateActiveTripFromBackground();
+    await _runBackgroundUpdateOnce();
   }
 
   @override
   void onRepeatEvent(DateTime timestamp) {
-    // The notification text never changes while a trip is running, so we
-    // avoid calling FlutterForegroundTask.updateService() on every tick —
-    // one less native binder call every 10 seconds for the lifetime of
-    // the trip.
-    updateActiveTripFromBackground();
+    // A location lookup can outlive the 10-second service interval on slow
+    // devices. Keep at most one update active to avoid concurrent writes to
+    // the persisted trip state.
+    unawaited(_runBackgroundUpdateOnce());
   }
 
   @override
